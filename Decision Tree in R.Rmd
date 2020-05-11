@@ -1,0 +1,387 @@
+---
+title: "Decision Tree in R"
+output:
+  html_document:
+    df_print: paged
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(DataExplorer)
+library(caTools)
+library(mice)
+library(corrplot)
+library(rpart)
+library(rpart.plot)
+library(party)
+library(ROCR)
+library(naivebayes)
+```
+## Pima Indians Diabetes Prediction
+
+This dataset is originally from the National Institute of Diabetes and Digestive and Kidney Diseases. The objective of the dataset is to diagnostically predict whether or not a patient has diabetes, based on certain diagnostic measurements included in the dataset. Several constraints were placed on the selection of these instances from a larger database. In particular, all patients here are females at least 21 years old of Pima Indian heritage.
+
+<h3>1. Data Exploration</h3>
+First input and see the structure of the dataset:
+```{r, echo = FALSE}
+data_dib <-  read.csv("diabetes.csv")
+data_dib$Outcome <- factor(data_dib$Outcome, levels = c(0,1), labels = c('Negative','Positive'))
+```
+```{r}
+str(data_dib)
+```
+Summary about the dataset:
+```{r}
+summary(data_dib)
+```
+<h3>2. The balace of prediction variable</h3>
+```{r}
+prop.table(table(data_dib$Outcome))
+```
+It is good that the dataset is not imbalance, around 65% and 35% for each type  is an acceptable ratio.
+<h3>3. Missing values</h3>
+Before check missing values of this dataset, follow the descript of this dataset "Missing values are believed to be encoded with zero values", so it need to convert all zero values to NA before check missing values of this dataset:
+```{r}
+data_dib[data_dib == 0] <- NA
+```
+Plot the missing values:
+```{r}
+plot_missing(data_dib)
+colSums(sapply(data_dib,is.na))
+```
+Top 3 variables have lot of missing values are Insulin (374 instances), Skin Thickness (227 instances), Pregnancies(111 instances)
+<h3>4. Imputation</h3>
+Mice (Multivariate Imputation via Chained Equations) will be applied for imputation and check the missing value again:
+```{r}
+imputed_data <- mice(data_dib, method = 'pmm', seed = 123)
+data_dib_imp <- complete(imputed_data)
+plot_missing(data_dib_imp)
+```
+</br>Plot the distribution to compare the different before and after imputation of the Insulin variable:
+```{r}
+plot(density(data_dib$Insulin, na.rm = TRUE), type="l", col="blue", main="Comparison Insulin variable before and after imputation")
+lines(density(data_dib_imp$Insulin), type="l",  col="red")
+legend("topright", legend=(c("Original","Imputed")), col=c("blue","red"), lty=1)
+```
+</br>After the imputation the dataset still keep it original distribution.
+<h3>5. The correlation between each variable</h3>
+```{r, echo=FALSE}
+corrTable <- cor(data_dib_imp[,c("Pregnancies","Glucose","BloodPressure","SkinThickness","Insulin","BMI","DiabetesPedigreeFunction","Age")])
+```
+```{r}
+corrTable
+corrplot(corrTable, method="color")
+```
+</br>There are 3 pairs that have a moderate impact on each other: Pregnancies and Age, Glucose and Insulin, SkinThickness and BMI. So far, the dataset is ready for training and validation.
+<h3>6. Stratified sampling</h3>
+The sampling will divide the dataset so that 70% instanses of the dataset will go for training and 30% will go for validating
+```{r, echo=FALSE}
+set.seed(123)
+split <- sample.split(data_dib_imp$Outcome, SplitRatio = 0.7)
+training_set = subset(data_dib_imp, split == TRUE)
+test_set = subset(data_dib_imp, split == FALSE)
+```
+```{r}
+str(training_set)
+str(test_set)
+```
+The proportion of the target variable in training set and test set:
+```{r}
+prop.table(table(training_set$Outcome))
+prop.table(table(test_set$Outcome))
+```
+<h3>7. Training with Default parameter Decision Tree</h3>
+The data will go for training with default parament. For plotting the extra = 104 param mean each node will include the extra informations: fitted class, probability per class of observations in the node  and percentages. The nn = True mean the node number will be included in each node.
+```{r}
+tree_def <- rpart(Outcome ~ ., data=training_set, method="class")
+summary(tree_def)
+rpart.plot(tree_def, extra = 104, nn = TRUE)
+plotcp(tree_def)
+```
+</br>The complexity parameter from 0.019 getting stable.
+<h3>8. Training with Decision Tree using Information Gain index</h3>
+Default the Decision Tree use Gini impurity measure to split the node, now using Information Gain impurity measure.
+```{r}
+tree_info <- rpart(Outcome ~ ., data=training_set, parms=list(split="information"))
+summary(tree_info)
+rpart.plot(tree_info, extra = 104, nn = TRUE)
+plotcp(tree_info)
+```
+</br>There is a little different in the Decision Tree, belong to the right son of node number 11, instead of Blood Pressure value is the split value, it change to Insulin. The complexity parameter plot from 0.019 it not stable anymore, the xerror now is fluctuate.
+<h3>9. Training with Decision Tree using Entropy index</h3>
+```{r}
+tree_entro <- rpart(Outcome ~ ., data=training_set, parms=list(split="entropy"))
+summary(tree_entro)
+rpart.plot(tree_entro, extra = 104, nn = TRUE)
+plotcp(tree_entro)
+```
+</br>The Decision Tree keep it same shape as using Gini index, while the complexity parameter plot is little different, but in general it starts stable from 0.019.
+<h3>10. Training with Parameter Decision Tree</h3>
+We will using the Min bucket = 10, mean any leaf (terminal node) must have minimum 10 observation. Futhermore, as the complexity parameter plot show that from 0.019 the xerror already stable, the cp parameter will be apply to terminal when cp reach 0.019 to avoid overfitting.
+```{r}
+tree_param <- rpart(Outcome ~ ., data=training_set, minbucket = 10, cp = 0.019)
+summary(tree_param)
+rpart.plot(tree_param, extra = 104, nn = TRUE)
+plotcp(tree_param)
+```
+</br>The Decision Tree now look simpler than above.
+<h3>11. Preditction Result</h3>
+Predict the 4 models above on the test set and training set:
+```{r}
+predict_def_test = predict(tree_def, test_set, type = "class")
+predict_def_train = predict(tree_def, training_set, type = "class")
+predict_info_test = predict(tree_info, test_set, type = "class")
+predict_info_train = predict(tree_info, training_set, type = "class")
+predict_entro_test = predict(tree_entro, test_set, type = "class")
+predict_entro_train = predict(tree_entro, training_set, type = "class")
+predict_param_test = predict(tree_param, test_set, type = "class")
+predict_param_train = predict(tree_param, training_set, type = "class")
+#Confusion Matrix
+cm_def_test = table(predict_def_test, test_set$Outcome)
+cm_def_train = table(predict_def_train, training_set$Outcome)
+cm_info_test = table(predict_info_test, test_set$Outcome)
+cm_info_train = table(predict_info_train, training_set$Outcome)
+cm_entro_test = table(predict_entro_test, test_set$Outcome)
+cm_entro_train = table(predict_entro_train, training_set$Outcome)
+cm_param_test = table(predict_param_test, test_set$Outcome)
+cm_param_train = table(predict_param_train, training_set$Outcome)
+```
+```{r, echo=FALSE}
+accuracy_def_test = sum(diag(cm_def_test))/sum(cm_def_test) 
+accuracy_def_train = sum(diag(cm_def_train))/sum(cm_def_train) 
+accuracy_info_test = sum(diag(cm_info_test))/sum(cm_info_test)
+accuracy_info_train = sum(diag(cm_info_train))/sum(cm_info_train)
+accuracy_entro_test = sum(diag(cm_entro_test))/sum(cm_entro_test)
+accuracy_entro_train = sum(diag(cm_entro_train))/sum(cm_entro_train)
+accuracy_param_test = sum(diag(cm_param_test))/sum(cm_param_test)
+accuracy_param_train = sum(diag(cm_param_train))/sum(cm_param_train)
+```
+Confusion Matrix of the prediction above:
+```{r}
+cm_def_test
+cm_def_train
+cm_info_test
+cm_info_train
+cm_entro_test
+cm_entro_train
+cm_param_test
+cm_param_train
+```
+The prediction accuracy of the 4 models above on the training and test set:
+<table class="table table-bordered" style="margin-left: auto; margin-right: auto;">
+<thead>
+<tr>
+<th style="border-bottom:hidden; padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center; " colspan="2">
+<div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">
+Default Parameter Decision Tree
+</div>
+</th>
+<th style="border-bottom:hidden; padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center; " colspan="2">
+<div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">
+Decision Tree using Information Gain index
+</div>
+</th>
+<th style="border-bottom:hidden; padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center;" colspan="2">
+<div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">
+Decision Tree using Entropy index
+</div>
+</th>
+<th style="border-bottom:hidden; padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center;" colspan="2">
+<div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">
+Parameter Decision Tree
+</div>
+</th>
+</tr>
+<tr>
+<th style="text-align:right;">
+Accuracy on training set
+</th>
+<th style="text-align:right;">
+Accuracy on test set
+</th>
+<th style="text-align:right;">
+Accuracy on training set
+</th>
+<th style="text-align:right;">
+Accuracy on test set
+</th>
+<th style="text-align:right;">
+Accuracy on training set
+</th>
+<th style="text-align:right;">
+Accuracy on test set
+</th>
+<th style="text-align:right;">
+Accuracy on training set
+</th>
+<th style="text-align:right;">
+Accuracy on test set
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right;">
+0.8550186
+</td>
+<td style="text-align:right;">
+0.6956522
+</td>
+<td style="text-align:right;">
+0.8587361
+</td>
+<td style="text-align:right;">
+0.6913043
+</td>
+<td style="text-align:right;">
+0.8550186
+</td>
+<td style="text-align:right;">
+0.6956522
+</td>
+<td style="text-align:right;">
+0.8197026
+</td>
+<td style="text-align:right;">
+0.7043478
+</td>
+</tr>
+</tbody>
+</table>
+The Parameter Decision Tree with highest accuracy although just slightly, it may overcome the overfitting ib the training set as the first 3 models have very high accuaracy value on training set.
+```{r, echo=FALSE}
+predict_def_roc = predict(tree_def, test_set)
+predict_info_roc = predict(tree_info, test_set)
+predict_entro_roc = predict(tree_entro, test_set)
+predict_param_roc = predict(tree_param, test_set)
+
+pred_def = prediction(predict_def_roc[,2], test_set$Outcome)
+pred_info = prediction(predict_info_roc[,2], test_set$Outcome)
+pred_entro = prediction(predict_entro_roc[,2], test_set$Outcome)
+pred_param = prediction(predict_param_roc[,2], test_set$Outcome)
+perf_def = performance(pred_def, "tpr", "fpr")
+perf_info = performance(pred_info, "tpr", "fpr")
+perf_entro = performance(pred_entro, "tpr", "fpr")
+perf_param = performance(pred_param, "tpr", "fpr")
+```
+The ROC curve of 4 models on test set, note that the curves of Default Parameter Decision Tree and Decision Tree using Entropy index have overlap each other as they have same feature.
+```{r}
+plot(perf_def,
+     main = "ROC curve",
+     ylab = "Sensitivity",
+     xlab = "Specificity", col = "red")
+plot(perf_info, add = TRUE, col = "blue")
+plot(perf_entro, add = TRUE, col = "green")
+plot(perf_param, add = TRUE, col = "orange")
+legend("bottomright", c("Default", "Information Gain", "Entropy", "With Parameter"), lty=1, 
+    col = c("red", "blue","green","orange"), bty="n")
+```
+```{r, echo=FALSE}
+auc_def = as.numeric(performance(pred_def, "auc")@y.values)
+auc_def = round(auc_def, 3)
+auc_info = as.numeric(performance(pred_info, "auc")@y.values)
+auc_info = round(auc_info, 3)
+auc_entro = as.numeric(performance(pred_entro, "auc")@y.values)
+auc_entro = round(auc_entro, 3)
+auc_param = as.numeric(performance(pred_param, "auc")@y.values)
+auc_param = round(auc_param, 3)
+```
+The AUC summary table of 4 models:
+<table class="table table-bordered" style="margin-left: auto; margin-right: auto;">
+<thead>
+<tr>
+<th style="border-bottom:hidden; padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center; ">
+<div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">
+Default Parameter Decision Tree
+</div>
+</th>
+<th style="border-bottom:hidden; padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center; ">
+<div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">
+Decision Tree using Information Gain index
+</div>
+</th>
+<th style="border-bottom:hidden; padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center;">
+<div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">
+Decision Tree using Entropy index
+</div>
+</th>
+<th style="border-bottom:hidden; padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center;">
+<div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">
+Parameter Decision Tree
+</div>
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right;">
+0.74
+</td>
+<td style="text-align:right;">
+0.721
+</td>
+<td style="text-align:right;">
+0.74
+</td>
+<td style="text-align:right;">
+0.744
+</td>
+</tr>
+</tbody>
+</table>
+The AUC of Decision Tree using Information Gain index reach the lowest among 4 models. Default Decision Tree, Decision Tree using Entropy index, Parameter Decision Tree share the similarity AUC value.
+<h3>12. Naïve Bayes Result</h3>
+Conduct an experiment with Naïve Bayes on test set, in order to compare Decision Tree with other classification:
+```{r}
+classifier_def = naive_bayes(x = training_set[ ,-9], y = training_set$Outcome )
+classifier_lap = naive_bayes(x = training_set[ ,-9], y = training_set$Outcome,laplace = 1 )
+classifier_kernel = naive_bayes(x = training_set[ ,-9], y = training_set$Outcome, usekernel = TRUE )
+#Predicting
+pred_nb_def <- predict(classifier_def, newdata = test_set[ ,-9])
+cm_nb_def <- table(test_set$Outcome, pred_nb_def)
+accuracy_nb_def <- sum(diag(cm_nb_def))/sum(cm_nb_def)
+
+pred_nb_lap <- predict(classifier_lap, newdata = test_set[ ,-9])
+cm_nb_lap <- table(test_set$Outcome, pred_nb_lap)
+accuracy_nb_lap <- sum(diag(cm_nb_lap))/sum(cm_nb_lap)
+
+pred_nb_kernel <- predict(classifier_kernel, newdata = test_set[ ,-9])
+cm_nb_kernel <- table(test_set$Outcome, pred_nb_kernel)
+accuracy_nb_kernel <- sum(diag(cm_nb_kernel))/sum(cm_nb_kernel)
+```
+The accuracy of 3 models based on Naive Bayes:
+<table class="table table-bordered" style="margin-left: auto; margin-right: auto;">
+<thead>
+<tr>
+<th style="border-bottom:hidden; padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center; ">
+<div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">
+Default Naïve Bayes
+</div>
+</th>
+<th style="border-bottom:hidden; padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center; ">
+<div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">
+Naïve Bayes using Laplace
+</div>
+</th>
+<th style="border-bottom:hidden; padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center;">
+<div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">
+Naïve Bayes using Kernel
+</div>
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right;">
+0.7652174
+</td>
+<td style="text-align:right;">
+0.7652174
+</td>
+<td style="text-align:right;">
+0.7913043
+</td>
+</tr>
+</tbody>
+</table>
+<h3>13. Conclusion</h3>
+Among 4 models based on Decision Tree, Parameter Decision Tree model, which limit the complexity at 0.019 show the best performance. But in the final, the best model show it highest accuracy is Naïve Bayes using Kernel.
